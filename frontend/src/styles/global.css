@@ -1,0 +1,52 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  /* palette */
+  --c-bg:        #F7F5F0;
+  --c-surface:   #FFFFFF;
+  --c-ink:       #1A1814;
+  --c-ink-2:     #4A4640;
+  --c-ink-3:     #8A8680;
+  --c-accent:    #2B5CE6;
+  --c-accent-h:  #1A3DB8;
+  --c-success:   #1E7C4D;
+  --c-danger:    #C0392B;
+  --c-border:    #E2DED8;
+  --c-border-h:  #C8C4BE;
+
+  /* typography */
+  --f-display: 'DM Serif Display', Georgia, serif;
+  --f-body:    'DM Sans', system-ui, sans-serif;
+
+  /* spacing */
+  --r-sm:  6px;
+  --r-md:  12px;
+  --r-lg:  20px;
+  --r-xl:  32px;
+
+  /* motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+html, body, #root {
+  height: 100%;
+  min-height: 100vh;
+}
+
+body {
+  font-family: var(--f-body);
+  background: var(--c-bg);
+  color: var(--c-ink);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--c-border-h); border-radius: 3px; }
