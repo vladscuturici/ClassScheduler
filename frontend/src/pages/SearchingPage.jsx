@@ -190,6 +190,11 @@ export default function SearchingPage({
   }
 
   function handleAbort() {
+    const sessionId = parsedData?.session_id
+    if (sessionId) {
+      fetch(`/api/solve/cancel?session_id=${encodeURIComponent(sessionId)}`, { method: 'POST' })
+        .catch(() => {}) // best-effort; UI state doesn't depend on this succeeding
+    }
     ctrlRef.current?.abort()
     clearInterval(timerRef.current)
     setStatus('error')

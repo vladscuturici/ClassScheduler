@@ -31,53 +31,15 @@ const SUBJECT_CONSTRAINTS = [
     description: 'Limits back-to-back sessions of the same subject per day.',
     params: [{ key: 'max_classes', label: 'Max consecutive', min: 1, max: 10, default: 1 }],
   },
-  {
-    id: 'MaxClassesPerDayConstraint',
-    label: 'Max classes per day',
-    description: 'Caps how many times a subject appears in a single day.',
-    params: [{ key: 'max_classes', label: 'Max per day', min: 1, max: 8, default: 2 }],
-  },
-  {
-    id: 'EarlyClassesPreferenceConstraint',
-    label: 'Prefer early slots',
-    description: 'Scores higher when this subject is scheduled in the first two hours.',
-    params: [],
-    softOnly: true,
-  },
-  {
-    id: 'LateClassesPreferenceConstraint',
-    label: 'Prefer late slots',
-    description: 'Scores higher when this subject is scheduled in the last two hours.',
-    params: [],
-    softOnly: true,
-  },
-  {
-    id: 'LastClassConstraint',
-    label: 'Must be last (hard)',
-    description: 'This subject must always occupy the final slot of the day.',
-    params: [],
-  },
-  {
-    id: 'LastClassPreferenceConstraint',
-    label: 'Prefer last slot',
-    description: 'Soft preference: score is higher when placed last in the day.',
-    params: [],
-    softOnly: true,
-  },
 ]
 
 // ── recommended logic ─────────────────────────────────────────────────────────
 
 function getRecommendedSubjectConstraints(subject) {
-  const { sessions_per_week, relevance } = subject
+  const { sessions_per_week } = subject
   const mc = sessions_per_week < 6 ? 2 : 7
   return [
     { id: 'MaxConsecutiveClassesConstraint', enabled: true, params: { max_classes: mc } },
-    {
-      id: relevance > 6 ? 'EarlyClassesPreferenceConstraint' : 'LateClassesPreferenceConstraint',
-      enabled: true,
-      params: {},
-    },
   ]
 }
 
@@ -434,7 +396,6 @@ function ClassSection({ cls, classConstraints, subjectConstraints, recommendedSt
                 <div>
                   <div style={{ display: 'flex', gap: 16, marginBottom: 10, fontSize: 13, color: 'var(--c-ink-3)' }}>
                     <span>Sessions/week: <strong style={{ color: 'var(--c-ink-2)' }}>{activeSubj.sessions_per_week}</strong></span>
-                    <span>Relevance: <strong style={{ color: 'var(--c-ink-2)' }}>{activeSubj.relevance}</strong></span>
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                     {subjConstraints.map((cs, i) => {
@@ -454,12 +415,6 @@ function ClassSection({ cls, classConstraints, subjectConstraints, recommendedSt
                         />
                       )
                     })}
-                    <AddConstraintMenu
-                      existingIds={subjConstraints.map((c) => c.id)}
-                      allDefs={SUBJECT_CONSTRAINTS}
-                      disabled={readOnly}
-                      onAdd={(nc) => onSubjectChange(subjKey, [...subjConstraints, nc])}
-                    />
                   </div>
                 </div>
               )}

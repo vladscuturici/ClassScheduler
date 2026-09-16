@@ -32,7 +32,7 @@ from models.school_class import SchoolClass, SubjectRequirement
 from models.scheduled_class import ScheduledClass
 from models.context import SchedulerContext
 from models.schedule import Schedule
-from scheduler.scheduler2_3 import Scheduler
+from scheduler.scheduler_cpsat import Scheduler
 from models.constraints.class_constraints import (
     MinDailyClassCount,
     MaxDailyClassCount,
@@ -56,6 +56,24 @@ HOURS     = 8
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 DAY_COL_MAP = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4}
 DAY_SHORT   = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+
+DAYS      = 5
+HOURS     = 8
+DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+DAY_NAMES_RO = ["Luni", "Marti", "Miercuri", "Joi", "Vineri"]
+DAY_COL_MAP = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4}
+DAY_SHORT   = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+
+# H1 = 8:00, H2 = 9:00, etc. Adjust if the school day starts at a different hour.
+START_HOUR = 8
+def _hour_label(h: int) -> str:
+    return f"{START_HOUR + h}:00"
+
+# Grades at or below this are treated as "low grade" — their schedules are
+# opportunistic slots filled in as teacher availability allows, not a
+# finalized fixed-start schedule, so late-start / compactness checks that
+# make sense for grade 5+ don't apply to them yet.
+LOW_GRADE_MAX = 4
 
 _session: dict[str, Any] = {}
 
@@ -173,7 +191,31 @@ class SwapCandidate(BaseModel):
     status: str
     violated_constraints: list[str]
 
+class ManualSlot(BaseModel):
+    class_name: str
+    subject: str
+    teacher: str
+    day: int
+    hour: int
 
+class InitManualRequest(BaseModel):
+    session_id: str
+    classes: list[ClassInfo]
+    teachers: list[TeacherInfo]
+
+class ManualPlaceRequest(BaseModel):
+    session_id: str
+    class_name: str
+    subject: str
+    teacher: str
+    day: int
+    hour: int
+
+class ManualClearRequest(BaseModel):
+    session_id: str
+    day: int
+    hour: int
+    teacher: str 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -362,6 +404,14 @@ def _extract_grids(
 
     return ScheduleGrid(class_schedules=class_schedules, teacher_schedules=teacher_schedules)
 
+def _compute_export_hours(hour_indices) -> int:
+    """Given an iterable of hour indices actually used, return how many hour
+    columns/rows to export — trailing unused hours (e.g. H8 / 15:00) are
+    dropped. Falls back to the full HOURS if nothing is used at all."""
+    used = list(hour_indices)
+    if not used:
+        return HOURS
+    return min(HOURS, max(used) + 1)
 
 def _build_excel_bytes(
     school_classes_map: dict[str, SchoolClass],
@@ -378,7 +428,18 @@ def _build_excel_bytes(
     CENTER       = Alignment(horizontal="center", vertical="center", wrap_text=True)
     LEFT         = Alignment(horizontal="left", vertical="center")
     thin         = Side(style="thin", color="BFBFBF")
+    thick        = Side(style="medium", color="404040")
     BORDER       = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # ── one global export_hours for the whole export ─────────────────────────
+    # Only drop hour index 7 (H8 / 15:00) if it is NEVER used by ANY class,
+    # ANY teacher, ANYWHERE. Otherwise every sheet keeps all 8 hours.
+    last_hour_used = 0
+    for sc in school_classes_map.values():
+        for (day, hour), slot in sc.schedule.slots.items():
+            if slot is not None:
+                last_hour_used = max(last_hour_used, hour)
+    export_hours = min(HOURS, last_hour_used + 1)
 
     teacher_grid: dict[str, dict[tuple[int, int], str]] = {t: {} for t in teachers_map}
     for class_name, sc in school_classes_map.items():
@@ -386,74 +447,124 @@ def _build_excel_bytes(
             if slot is not None and slot.teacher.name in teacher_grid:
                 teacher_grid[slot.teacher.name][(day, hour)] = class_name
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Teacher Schedule"
-    ws.cell(1, 1, "Teacher").font = WHITE_BOLD; ws.cell(1, 1).fill = HEADER_FILL
-    ws.cell(1, 1).alignment = CENTER; ws.cell(1, 1).border = BORDER
-    ws.cell(1, 2, "Total").font = WHITE_BOLD; ws.cell(1, 2).fill = HEADER_FILL
-    ws.cell(1, 2).alignment = CENTER; ws.cell(1, 2).border = BORDER
-    for di, dn in enumerate(DAY_NAMES):
-        sc = 3 + di * HOURS; ec = sc + HOURS - 1
-        ws.merge_cells(start_row=1, start_column=sc, end_row=1, end_column=ec)
-        cell = ws.cell(1, sc, dn)
-        cell.font = WHITE_BOLD; cell.fill = DAY_FILL; cell.alignment = CENTER; cell.border = BORDER
-    ws.cell(2, 1).fill = HEADER_FILL; ws.cell(2, 1).border = BORDER
-    ws.cell(2, 2).fill = HEADER_FILL; ws.cell(2, 2).border = BORDER
-    for di in range(DAYS):
-        for h in range(HOURS):
-            col = 3 + di * HOURS + h
-            cell = ws.cell(2, col, f"H{h+1}")
-            cell.font = WHITE_BOLD; cell.fill = DAY_FILL; cell.alignment = CENTER; cell.border = BORDER
-    for ri, tname in enumerate(sorted(teacher_grid)):
-        er = 3 + ri
-        tc = ws.cell(er, 1, tname); tc.font = DARK_BOLD; tc.fill = TEACHER_FILL
-        tc.alignment = LEFT; tc.border = BORDER
-        tc2 = ws.cell(er, 2, len(teacher_grid[tname])); tc2.font = DARK_BOLD
-        tc2.fill = TEACHER_FILL; tc2.alignment = CENTER; tc2.border = BORDER
+    # ── helper to draw the "all teachers" overview sheet ─────────────────────
+    # This is the ONLY sheet that gets the thick day-separator borders.
+    def _draw_overview_sheet(ws, row_names, cell_lookup, totals):
+        ws.cell(1, 1, "Profesor").font = WHITE_BOLD
+        ws.cell(1, 1).fill = HEADER_FILL; ws.cell(1, 1).alignment = CENTER; ws.cell(1, 1).border = BORDER
+        ws.cell(1, 2, "Total").font = WHITE_BOLD; ws.cell(1, 2).fill = HEADER_FILL
+        ws.cell(1, 2).alignment = CENTER; ws.cell(1, 2).border = BORDER
+        for di, dn in enumerate(DAY_NAMES_RO):
+            sc_col = 3 + di * export_hours; ec = sc_col + export_hours - 1
+            ws.merge_cells(start_row=1, start_column=sc_col, end_row=1, end_column=ec)
+            cell = ws.cell(1, sc_col, dn)
+            cell.font = WHITE_BOLD; cell.fill = DAY_FILL; cell.alignment = CENTER
+            cell.border = Border(left=thick, right=thin, top=thin, bottom=thin)
+        ws.cell(2, 1).fill = HEADER_FILL; ws.cell(2, 1).border = BORDER
+        ws.cell(2, 2).fill = HEADER_FILL; ws.cell(2, 2).border = BORDER
         for di in range(DAYS):
-            for h in range(HOURS):
-                col = 3 + di * HOURS + h
-                cname = teacher_grid[tname].get((di, h), "")
-                cell = ws.cell(er, col, cname); cell.alignment = CENTER; cell.border = BORDER
-                if cname: cell.font = CLASS_FONT; cell.fill = CLASS_FILL
-                else: cell.fill = EMPTY_FILL
-    ws.column_dimensions["A"].width = 26; ws.column_dimensions["B"].width = 7
-    for col in range(3, 3 + DAYS * HOURS):
-        ws.column_dimensions[get_column_letter(col)].width = 6
-    ws.row_dimensions[1].height = 18; ws.row_dimensions[2].height = 16
-    for ri in range(len(teacher_grid)): ws.row_dimensions[3 + ri].height = 18
-    ws.freeze_panes = "C3"
-    t_buf = io.BytesIO(); wb.save(t_buf); teacher_bytes = t_buf.getvalue()
+            for h in range(export_hours):
+                col = 3 + di * export_hours + h
+                cell = ws.cell(2, col, _hour_label(h))
+                cell.font = WHITE_BOLD; cell.fill = DAY_FILL; cell.alignment = CENTER
+                cell.border = Border(left=thick, right=thin, top=thin, bottom=thin) if h == 0 else BORDER
+        for ri, name in enumerate(row_names):
+            er = 3 + ri
+            tc = ws.cell(er, 1, name); tc.font = DARK_BOLD; tc.fill = TEACHER_FILL
+            tc.alignment = LEFT; tc.border = BORDER
+            tc2 = ws.cell(er, 2, totals[name]); tc2.font = DARK_BOLD
+            tc2.fill = TEACHER_FILL; tc2.alignment = CENTER; tc2.border = BORDER
+            for di in range(DAYS):
+                for h in range(export_hours):
+                    col = 3 + di * export_hours + h
+                    val = cell_lookup(name, di, h)
+                    cell = ws.cell(er, col, val); cell.alignment = CENTER
+                    cell.border = Border(left=thick, right=thin, top=thin, bottom=thin) if h == 0 else BORDER
+                    if val: cell.font = CLASS_FONT; cell.fill = CLASS_FILL
+                    else: cell.fill = EMPTY_FILL
+        ws.column_dimensions["A"].width = 26; ws.column_dimensions["B"].width = 7
+        for col in range(3, 3 + DAYS * export_hours):
+            ws.column_dimensions[get_column_letter(col)].width = 6
+        ws.row_dimensions[1].height = 18; ws.row_dimensions[2].height = 16
+        for ri in range(len(row_names)): ws.row_dimensions[3 + ri].height = 18
+        ws.freeze_panes = "C3"
 
-    wb2 = Workbook(); wb2.remove(wb2.active)
-    for class_name, sc in sorted(school_classes_map.items()):
-        ws2 = wb2.create_sheet(title=class_name)
+    # ── helper to draw one individual Day×Hour sheet (one teacher or class) ──
+    # No thick separators here — only the overview sheet gets those.
+    # Always draws `export_hours` rows (the same global value for every sheet),
+    # regardless of whether this particular teacher/class uses all of them.
+    def _draw_individual_sheet(ws2, cell_lookup):
         ws2.merge_cells("A1:A2")
-        ws2.cell(1, 1, "Hour").font = WHITE_BOLD; ws2.cell(1, 1).fill = HEADER_FILL
+        ws2.cell(1, 1, "Ora").font = WHITE_BOLD; ws2.cell(1, 1).fill = HEADER_FILL
         ws2.cell(1, 1).alignment = CENTER; ws2.cell(1, 1).border = BORDER
-        for di, dn in enumerate(DAY_NAMES):
+        for di, dn in enumerate(DAY_NAMES_RO):
             col = 2 + di
             cell = ws2.cell(1, col, dn); cell.font = WHITE_BOLD; cell.fill = DAY_FILL
             cell.alignment = CENTER; cell.border = BORDER
             ws2.column_dimensions[get_column_letter(col)].width = 25
-        for h in range(HOURS):
+        for h in range(export_hours):
             row_idx = 3 + h
-            hc = ws2.cell(row_idx, 1, f"Hour {h+1}"); hc.font = DARK_BOLD
+            hc = ws2.cell(row_idx, 1, _hour_label(h)); hc.font = DARK_BOLD
             hc.fill = TEACHER_FILL; hc.border = BORDER; hc.alignment = CENTER
             for di in range(DAYS):
                 col_idx = 2 + di
-                info = sc.schedule.get_slot_display(di, h)
-                text = ""
-                if info:
-                    parts = info.split(" - ")
-                    text = f"{parts[0]}\n({parts[2]})" if len(parts) >= 3 else parts[0]
+                text = cell_lookup(di, h)
                 cell = ws2.cell(row_idx, col_idx, text)
                 cell.alignment = CENTER; cell.border = BORDER
                 if text: cell.font = CLASS_FONT; cell.fill = CLASS_FILL
                 else: cell.fill = EMPTY_FILL
         ws2.column_dimensions["A"].width = 12
-        for r in range(1, HOURS + 3): ws2.row_dimensions[r].height = 35
+        for r in range(1, export_hours + 3): ws2.row_dimensions[r].height = 35
+
+    # ═══════════════════ TEACHERS WORKBOOK ═══════════════════
+    wb = Workbook()
+    ws_overview = wb.active
+    ws_overview.title = "Orar profesori"
+    teacher_names = sorted(teacher_grid)
+    _draw_overview_sheet(
+        ws_overview,
+        teacher_names,
+        cell_lookup=lambda name, di, h: teacher_grid[name].get((di, h), ""),
+        totals={t: len(teacher_grid[t]) for t in teacher_names},
+    )
+
+    # one sheet per individual teacher — always export_hours rows
+    for tname in teacher_names:
+        safe_name = "".join(c for c in tname if c not in '\\/*?:[]')[:31] or "Profesor"
+        base_name, suffix = safe_name, 1
+        while base_name in wb.sheetnames:
+            suffix += 1
+            base_name = f"{safe_name[:28]}_{suffix}"
+        ws_t = wb.create_sheet(title=base_name)
+
+        teacher_slots: dict[tuple[int, int], tuple[str, str]] = {}
+        for class_name, sc in school_classes_map.items():
+            for (day, hour), slot in sc.schedule.slots.items():
+                if slot is not None and slot.teacher.name == tname:
+                    teacher_slots[(day, hour)] = (class_name, slot.subject.name)
+
+        def _teacher_cell_text(di, h, _slots=teacher_slots):
+            info = _slots.get((di, h))
+            return f"{info[0]}\n({info[1]})" if info else ""
+
+        _draw_individual_sheet(ws_t, _teacher_cell_text)
+
+    t_buf = io.BytesIO(); wb.save(t_buf); teacher_bytes = t_buf.getvalue()
+
+    # ═══════════════════ CLASSES WORKBOOK ═══════════════════
+    wb2 = Workbook(); wb2.remove(wb2.active)
+    for class_name, sc in sorted(school_classes_map.items()):
+        ws2 = wb2.create_sheet(title=class_name)
+
+        def _class_cell_text(di, h, sc=sc):
+            info = sc.schedule.get_slot_display(di, h)
+            if not info:
+                return ""
+            parts = info.split(" - ")
+            return f"{parts[0]}\n({parts[2]})" if len(parts) >= 3 else parts[0]
+
+        _draw_individual_sheet(ws2, _class_cell_text)
+
     c_buf = io.BytesIO(); wb2.save(c_buf); class_bytes = c_buf.getvalue()
     return teacher_bytes, class_bytes
 
@@ -584,9 +695,22 @@ async def solve_stream(req: SolveRequest):
         def _emit(obj: dict):
             loop.call_soon_threadsafe(log_queue.put_nowait, obj)
 
+        cancel_event = threading.Event()
+        _session[req.session_id]["cancel_event"] = cancel_event
+
         def _run_solver():
             try:
-                context, school_classes_map, teachers_map = _build_context(req)
+                existing = _session[req.session_id].get("school_classes_map")
+                if existing:
+                    school_classes_map = existing
+                    teachers_map = _session[req.session_id]["teachers_map"]
+                    context = SchedulerContext(
+                        classes=list(school_classes_map.values()),
+                        teachers=list(teachers_map.values()),
+                        rooms=[r for sc in school_classes_map.values() for r in {req.room.name: req.room for req in sc.subject_requirements}.values()],
+                    )
+                else:
+                    context, school_classes_map, teachers_map = _build_context(req)
 
                 import builtins
                 orig_print = builtins.print
@@ -618,7 +742,12 @@ async def solve_stream(req: SolveRequest):
                         f"max {req.max_solutions} solution(s)"
                     )})
                     scheduler = Scheduler(context)
-                    success = scheduler.solve_top_n(max_solutions=req.max_solutions)
+                    success = scheduler.solve_cpsat(time_limit=120.0, cancel_event=cancel_event)
+                    scheduler.diagnose_infeasibility(time_limit=60.0)
+                    # success = scheduler.solve_top_n(
+                    #     max_solutions=req.max_solutions,
+                    #     cancel_event=cancel_event,
+                    # )
                 finally:
                     builtins.print = orig_print
 
@@ -628,7 +757,7 @@ async def solve_stream(req: SolveRequest):
                     _session[req.session_id]["school_classes_map"] = school_classes_map
                     _session[req.session_id]["teachers_map"]       = teachers_map
                     _emit({"type": "log", "message": "✓ Solution found!"})
-                    _emit({"type": "done", "success": True, "solutions": scheduler._solutions_found})
+                    _emit({"type": "done", "success": True, "solutions": getattr(scheduler, "_solutions_found", 1)})
                 else:
                     _emit({"type": "log", "message": "✗ No solution found."})
                     _emit({"type": "done", "success": False, "solutions": 0})
@@ -679,6 +808,14 @@ async def solve_stream(req: SolveRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+@app.post("/api/solve/cancel")
+async def cancel_solve(session_id: str):
+    sess = _session.get(session_id)
+    if not sess or "cancel_event" not in sess:
+        raise HTTPException(status_code=404, detail="No running solve for this session.")
+    sess["cancel_event"].set()
+    return {"cancelled": True}
 
 @app.get("/api/schedule/{session_id}", response_model=ScheduleGrid)
 async def get_schedule(session_id: str):
@@ -752,6 +889,25 @@ async def get_swap_candidates(req: SwapCandidatesRequest):
                         can_swap = False
                         violations.append(f"{teacher_a.name} busy at {DAY_NAMES[day_b]} H{hour_b+1}")
 
+                # Mirror the /api/swap late-start rejection here too, so a tile
+                # is never shown as a valid ("green") candidate when the actual
+                # swap endpoint would reject it for this reason. Skipped for low
+                # grades (0-4) — same exemption as /api/swap.
+                if can_swap:
+                    same_day_reshuffle = (
+                        cname == req.class_name and day_b == req.day and slot_b is not None
+                    )
+                    if not same_day_reshuffle:
+                        late_start_msg = _late_start_violation(sc_a, req.day, req.hour, day_b, hour_b, cname)
+                        if late_start_msg:
+                            can_swap = False
+                            violations.append(late_start_msg)
+                        if cname != req.class_name:
+                            late_start_msg_b = _late_start_violation(sc_b, day_b, hour_b, req.day, req.hour, req.class_name)
+                            if late_start_msg_b:
+                                can_swap = False
+                                violations.append(late_start_msg_b)
+
                 candidates.append(SwapCandidate(
                     class_name=cname, day=day_b, hour=hour_b,
                     status="valid" if can_swap else "invalid",
@@ -760,6 +916,49 @@ async def get_swap_candidates(req: SwapCandidatesRequest):
 
     return candidates
 
+def _day_start_hour(sc: SchoolClass, teacher_for_slot, day: int, exclude=None, add=None) -> int:
+    """First occupied hour for `sc` on `day`, after hypothetically removing
+    `exclude` (day,hour) and adding `add` (day,hour) as occupied. Returns
+    HOURS (i.e. 'none') if the day would end up empty."""
+    occupied = set()
+    for (d, h), slot in sc.schedule.slots.items():
+        if slot is not None and d == day:
+            occupied.add(h)
+    if exclude and exclude[0] == day:
+        occupied.discard(exclude[1])
+    if add and add[0] == day:
+        occupied.add(add[1])
+    return min(occupied) if occupied else HOURS
+
+
+def _late_start_violation(sc: SchoolClass, day_removed: int, hour_removed: int,
+                           day_added: int, hour_added: int, label: str) -> Optional[str]:
+    """Returns a human-readable violation message if moving `sc`'s lesson out
+    of (day_removed, hour_removed) would push that day's first lesson later —
+    or None if the move is fine. Skipped for low grades (0-4): their schedules
+    are opportunistic slots filled in as teacher availability allows, not a
+    finalized fixed-start schedule, so a shifting "first lesson" isn't a real
+    regression yet. Shared by /api/swap (hard rejection) and
+    /api/swap/candidates (so candidates are never shown as valid/green when
+    the swap endpoint would actually reject them for this reason).
+    """
+    if sc.grade <= LOW_GRADE_MAX:
+        return None
+    before = _day_start_hour(sc, None, day_removed, exclude=None, add=None)
+    if day_removed == day_added:
+        after = _day_start_hour(sc, None, day_removed,
+                                 exclude=(day_removed, hour_removed),
+                                 add=(day_added, hour_added))
+    else:
+        # removal and addition are on different days for this class —
+        # only the "removed" day can start later as a result of this swap
+        after = _day_start_hour(sc, None, day_removed,
+                                 exclude=(day_removed, hour_removed),
+                                 add=None)
+    if before != HOURS and after != HOURS and after > before:
+        return (f"{label} would now start later on {DAY_NAMES[day_removed]} "
+                f"(H{after + 1} instead of H{before + 1})")
+    return None
 
 @app.post("/api/swap")
 async def swap_slots(req: SwapRequest):
@@ -781,14 +980,94 @@ async def swap_slots(req: SwapRequest):
 
     slot_b = sc_b.schedule.get(req.day_b, req.hour_b)
     teacher_a = slot_a.teacher
+    teacher_b = slot_b.teacher if slot_b is not None else None
 
-    # Clear source
+    same_cell = (req.class_name_a == req.class_name_b
+                 and req.day_a == req.day_b and req.hour_a == req.hour_b)
+    if same_cell:
+        raise HTTPException(status_code=400, detail="Source and target slot are identical.")
+
+    same_class = req.class_name_a == req.class_name_b
+
+    # ── validate destination slots won't silently clobber unrelated lessons ──
+    if not same_class:
+        # sc_a is about to receive content at (day_b, hour_b); that cell must
+        # currently be empty, UNLESS it's exactly slot_b's cell (already handled).
+        existing_at_a_target = sc_a.schedule.get(req.day_b, req.hour_b)
+        if existing_at_a_target is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{req.class_name_a} already has a lesson at "
+                       f"{DAY_NAMES[req.day_b]} H{req.hour_b + 1}; refusing to overwrite it.",
+            )
+        existing_at_b_target = sc_b.schedule.get(req.day_a, req.hour_a)
+        if existing_at_b_target is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{req.class_name_b} already has a lesson at "
+                       f"{DAY_NAMES[req.day_a]} H{req.hour_a + 1}; refusing to overwrite it.",
+            )
+
+    # ── validate teacher availability at destination times ──────────────────
+    def _unavailable(teacher: Teacher, day: int, hour: int) -> bool:
+        for c in teacher.constraints:
+            if isinstance(c, UnavailableTimePeriodConstraint):
+                if (day, hour) in c._unavailable_set:
+                    return True
+        return False
+
+    if _unavailable(teacher_a, req.day_b, req.hour_b):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{teacher_a.name} is unavailable at {DAY_NAMES[req.day_b]} H{req.hour_b + 1}.",
+        )
+
+    if teacher_b is not None and _unavailable(teacher_b, req.day_a, req.hour_a):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{teacher_b.name} is unavailable at {DAY_NAMES[req.day_a]} H{req.hour_a + 1}.",
+        )
+
+    # teacher_a must be free at (day_b, hour_b) unless that's simply where
+    # teacher_b's own lesson currently sits (which is moving out of the way)
+    ta_at_target = teacher_a.schedule.get(req.day_b, req.hour_b)
+    if ta_at_target is not None and ta_at_target is not slot_b:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{teacher_a.name} is already teaching at "
+                   f"{DAY_NAMES[req.day_b]} H{req.hour_b + 1}.",
+        )
+
+    if teacher_b is not None:
+        tb_at_source = teacher_b.schedule.get(req.day_a, req.hour_a)
+        if tb_at_source is not None and tb_at_source is not slot_a:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{teacher_b.name} is already teaching at "
+                       f"{DAY_NAMES[req.day_a]} H{req.hour_a + 1}.",
+            )
+
+    # ── validate the swap doesn't delay either class's start of day ─────────
+    # Same class + same day + target already occupied = a same-day reshuffle:
+    # both hours stay occupied, only their contents trade places, so the set
+    # of occupied hours for that day is unchanged — nothing to check.
+    same_day_reshuffle = (
+        same_class and req.day_a == req.day_b and slot_b is not None
+    )
+    if not same_day_reshuffle:
+        msg = _late_start_violation(sc_a, req.day_a, req.hour_a, req.day_b, req.hour_b, req.class_name_a)
+        if msg:
+            raise HTTPException(status_code=409, detail=f"{msg}; swap rejected.")
+        if not same_class:
+            msg_b = _late_start_violation(sc_b, req.day_b, req.hour_b, req.day_a, req.hour_a, req.class_name_b)
+            if msg_b:
+                raise HTTPException(status_code=409, detail=f"{msg_b}; swap rejected.")
+
+    # ── all clear — perform the swap ─────────────────────────────────────────
     sc_a.schedule.clear(req.day_a, req.hour_a)
     teacher_a.schedule.clear(req.day_a, req.hour_a)
 
     if slot_b is not None:
-        # Normal swap: also move slot_b back to where slot_a was
-        teacher_b = slot_b.teacher
         sc_b.schedule.clear(req.day_b, req.hour_b)
         teacher_b.schedule.clear(req.day_b, req.hour_b)
 
@@ -799,7 +1078,6 @@ async def swap_slots(req: SwapRequest):
         sc_b.schedule.assign(req.day_a, req.hour_a, new_b)
         teacher_b.schedule.assign(req.day_a, req.hour_a, new_b)
 
-    # Place slot_a at the target (works for both swap and move-to-empty)
     new_a = ScheduledClass(
         school_class=slot_a.school_class, subject=slot_a.subject,
         teacher=slot_a.teacher, room=slot_a.room, day=req.day_b, hour=req.hour_b,
@@ -810,7 +1088,6 @@ async def swap_slots(req: SwapRequest):
     grids = _extract_grids(school_classes_map, teachers_map)
     sess["grids"] = grids
     return grids
-
 
 @app.get("/api/export/teacher/{session_id}")
 async def export_teacher_schedule(session_id: str):
@@ -837,6 +1114,105 @@ async def export_class_schedules(session_id: str):
         headers={"Content-Disposition": "attachment; filename=class_schedules.xlsx"},
     )
 
+
+@app.post("/api/manual/init", response_model=ScheduleGrid)
+async def init_manual(req: InitManualRequest):
+    """Builds an empty solver context (no solving) so the teacher/class grids
+    exist and can be filled in one tile at a time."""
+    fake_req = SolveRequest(session_id=req.session_id, classes=req.classes, teachers=req.teachers)
+    context, school_classes_map, teachers_map = _build_context(fake_req)
+    grids = _extract_grids(school_classes_map, teachers_map)  # all-empty grids
+    _session[req.session_id]["school_classes_map"] = school_classes_map
+    _session[req.session_id]["teachers_map"] = teachers_map
+    _session[req.session_id]["grids"] = grids
+    return grids
+
+
+class ManualCandidate(BaseModel):
+    class_name: str
+    subject: str
+    valid: bool
+    reason: Optional[str] = None
+
+
+@app.get("/api/manual/candidates", response_model=list[ManualCandidate])
+async def manual_candidates(session_id: str, teacher: str, day: int, hour: int):
+    sess = _session.get(session_id)
+    if not sess or "school_classes_map" not in sess:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    school_classes_map = sess["school_classes_map"]
+    teachers_map = sess["teachers_map"]
+    t = teachers_map.get(teacher)
+    if t is None:
+        raise HTTPException(status_code=404, detail="Teacher not found.")
+
+    if not t.schedule.is_free(day, hour):
+        raise HTTPException(status_code=400, detail="Teacher already busy at this slot.")
+    for c in t.constraints:
+        if isinstance(c, UnavailableTimePeriodConstraint) and (day, hour) in c._unavailable_set:
+            raise HTTPException(status_code=400, detail="Teacher unavailable at this slot.")
+
+    out = []
+    for cname, sc in school_classes_map.items():
+        for req in sc.subject_requirements:
+            if req.teacher.name != teacher:
+                continue
+            already = sum(
+                1 for slot in sc.schedule.slots.values()
+                if slot and slot.subject.name == req.subject.name and slot.teacher.name == teacher
+            )
+            if already >= req.sessions_per_week:
+                continue
+            if not sc.schedule.is_free(day, hour):
+                out.append(ManualCandidate(class_name=cname, subject=req.subject.name, valid=False, reason="Class already has a lesson then."))
+                continue
+            out.append(ManualCandidate(class_name=cname, subject=req.subject.name, valid=True))
+    return out
+
+
+@app.post("/api/manual/place", response_model=ScheduleGrid)
+async def manual_place(req: ManualPlaceRequest):
+    sess = _session.get(req.session_id)
+    if not sess or "school_classes_map" not in sess:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    school_classes_map = sess["school_classes_map"]
+    teachers_map = sess["teachers_map"]
+    sc = school_classes_map.get(req.class_name)
+    teacher = teachers_map.get(req.teacher)
+    if sc is None or teacher is None:
+        raise HTTPException(status_code=404, detail="Class or teacher not found.")
+    req_obj = next((r for r in sc.subject_requirements if r.subject.name == req.subject and r.teacher.name == req.teacher), None)
+    if req_obj is None:
+        raise HTTPException(status_code=400, detail=f"{req.teacher} doesn't teach {req.subject} to {req.class_name}.")
+    if not sc.schedule.is_free(req.day, req.hour) or not teacher.schedule.is_free(req.day, req.hour):
+        raise HTTPException(status_code=409, detail="Slot is no longer free.")
+
+    scheduled = ScheduledClass(school_class=sc, subject=req_obj.subject, teacher=teacher, room=req_obj.room, day=req.day, hour=req.hour)
+    sc.schedule.assign(req.day, req.hour, scheduled)
+    teacher.schedule.assign(req.day, req.hour, scheduled)
+
+    grids = _extract_grids(school_classes_map, teachers_map)
+    sess["grids"] = grids
+    return grids
+
+
+@app.post("/api/manual/clear", response_model=ScheduleGrid)
+async def manual_clear(req: ManualClearRequest):
+    sess = _session.get(req.session_id)
+    if not sess or "school_classes_map" not in sess:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    teachers_map = sess["teachers_map"]
+    teacher = teachers_map.get(req.teacher)
+    if teacher is None:
+        raise HTTPException(status_code=404, detail="Teacher not found.")
+    slot = teacher.schedule.get(req.day, req.hour)
+    if slot is None:
+        raise HTTPException(status_code=400, detail="Slot is already empty.")
+    slot.school_class.schedule.clear(req.day, req.hour)
+    teacher.schedule.clear(req.day, req.hour)
+    grids = _extract_grids(sess["school_classes_map"], teachers_map)
+    sess["grids"] = grids
+    return grids
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SPA catch-all — MUST be last

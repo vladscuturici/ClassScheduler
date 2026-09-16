@@ -48,50 +48,6 @@ const sortSubjects = (subjects) =>
       : a.name.localeCompare(b.name)
   )
 
-function Toggle({ on, onChange }) {
-  return (
-    <div
-      role="switch" aria-checked={on} tabIndex={0}
-      onClick={() => onChange(!on)}
-      onKeyDown={e => (e.key === ' ' || e.key === 'Enter') && onChange(!on)}
-      style={{
-        width: 36, height: 20, borderRadius: 100,
-        border: `0.5px solid ${on ? '#185FA5' : 'var(--c-border-h)'}`,
-        background: on ? 'var(--c-accent)' : 'var(--c-surface-2)',
-        cursor: 'pointer', position: 'relative', flexShrink: 0,
-        transition: 'background .15s, border-color .15s',
-      }}
-    >
-      <div style={{
-        position: 'absolute', top: 2, left: on ? 18 : 2,
-        width: 14, height: 14, borderRadius: '50%',
-        background: '#fff', transition: 'left .15s',
-      }} />
-    </div>
-  )
-}
-
-function RelevancePicker({ value, onChange }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-      {Array.from({ length: 10 }, (_, i) => {
-        const v = i + 1
-        return (
-          <div key={v} title={String(v)} onClick={() => onChange(v)} style={{
-            width: 14, height: 14, borderRadius: 3, cursor: 'pointer',
-            border: `0.5px solid ${v <= value ? '#185FA5' : 'var(--c-border-h)'}`,
-            background: v <= value ? 'var(--c-accent)' : 'transparent',
-            transition: 'background .1s',
-          }} />
-        )
-      })}
-      <span style={{ fontSize: 11, color: 'var(--c-ink-3)', marginLeft: 4, minWidth: 14 }}>
-        {value}
-      </span>
-    </div>
-  )
-}
-
 function CollapseCard({ header, children, defaultOpen = false }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
@@ -145,10 +101,7 @@ const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
 
 // ─────────────────────────────────────────────────────────────────────────────
 export default function CustomizePage({ classes: initialClasses, teachers, onContinue, onBack }) {
-  const [mode, setMode] = useState('recommended')
-  const [balancedDifficulty, setBalancedDifficulty] = useState(false)
 
-  // AFTER
   const [classes, setClasses] = useState(() =>
     (initialClasses || DEMO_CLASSES).map(c => ({
       ...c,
@@ -174,29 +127,17 @@ export default function CustomizePage({ classes: initialClasses, teachers, onCon
     })
   })
 
-  // setRelevance works on the sorted index, which is stable since we sort on init
-  const setRelevance = useCallback((className, subjName, val) => {
-    setClasses(prev => prev.map(c =>
-      c.name !== className ? c : {
-        ...c,
-        subjects: c.subjects.map(s =>
-          s.name !== subjName ? s : { ...s, relevance: val }
-        ),
-      }
-    ))
-  }, [])
-
   const handleContinue = () => {
     const payload = {
-      classes: sortClasses(classes).map(c => ({  // ← add sortClasses() here
+      classes: sortClasses(classes).map(c => ({
         ...c,
         subjects: c.subjects.map(s => ({
           ...s,
-          relevance: mode === 'recommended' ? autoRelevance(s.sessions_per_week) : s.relevance,
+          relevance: autoRelevance(s.sessions_per_week), // always recommended
         })),
       })),
       teachers: resolvedTeachers,
-      use_balanced_difficulty: balancedDifficulty,
+      use_balanced_difficulty: false, // option removed, always off
     }
     onContinue?.(payload)
   }
@@ -221,52 +162,6 @@ export default function CustomizePage({ classes: initialClasses, teachers, onCon
       {/* body */}
       <div style={{ flex: 1, padding: '24px 32px', maxWidth: 860, width: '100%', margin: '0 auto' }}>
 
-        {/* mode switcher */}
-        <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
-          {['recommended', 'custom'].map(m => (
-            <button key={m} onClick={() => setMode(m)} style={{
-              padding: '8px 20px', borderRadius: 'var(--r-full)',
-              border: mode === m ? 'none' : '1px solid var(--c-border-h)',
-              background: mode === m ? 'var(--c-accent)' : 'var(--c-surface)',
-              color: mode === m ? '#fff' : 'var(--c-ink-2)',
-              cursor: 'pointer', fontSize: 13, fontWeight: 500,
-              fontFamily: 'var(--f-body)', transition: 'all .15s',
-            }}>
-              {m === 'recommended' ? '✦ Use recommended' : '⊕ Customize difficulty'}
-            </button>
-          ))}
-        </div>
-
-        {mode === 'recommended' && (
-          <div style={{
-            display: 'flex', gap: 10, alignItems: 'flex-start',
-            padding: '10px 14px', borderRadius: 'var(--r-md)',
-            background: 'rgba(43,92,230,.05)', border: '1px solid rgba(43,92,230,.15)',
-            fontSize: 13, color: 'var(--c-ink-2)', marginBottom: 20,
-          }}>
-            <span style={{ fontSize: 16, marginTop: 1 }}>ⓘ</span>
-            <span>
-              Subject difficulty is set automatically based on sessions per week:
-              {' '}4+ → 10 &nbsp;·&nbsp; 3 → 8 &nbsp;·&nbsp; 2 → 6 &nbsp;·&nbsp; 1 → 4.
-              Switch to <strong>Customize difficulty</strong> to override per subject.
-            </span>
-          </div>
-        )}
-
-        {/* options */}
-        <SectionLabel>Options</SectionLabel>
-        <div style={{
-          background: 'var(--c-surface)', border: '1px solid var(--c-border)',
-          borderRadius: 'var(--r-lg)', padding: '4px 14px', marginBottom: 20,
-        }}>
-          <ToggleRow
-            label="Balanced daily difficulty"
-            desc="Spread hard subjects across the week rather than concentrating them"
-            on={balancedDifficulty}
-            onChange={setBalancedDifficulty}
-          />
-        </div>
-
         {/* classes */}
         <SectionLabel>Classes &amp; subjects ({classes.length})</SectionLabel>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 24 }}>
@@ -289,7 +184,7 @@ export default function CustomizePage({ classes: initialClasses, teachers, onCon
                 {/* column headers */}
                 <div style={{
                   display: 'grid',
-                  gridTemplateColumns: mode === 'custom' ? '1fr 140px 52px 1fr' : '1fr 140px 52px',
+                  gridTemplateColumns: '1fr 140px 52px',
                   gap: 8, paddingBottom: 6,
                   borderBottom: '1px solid var(--c-border)', marginBottom: 4,
                   fontSize: 11, color: 'var(--c-ink-3)', fontWeight: 500,
@@ -298,13 +193,12 @@ export default function CustomizePage({ classes: initialClasses, teachers, onCon
                   <span>Subject</span>
                   <span>Teacher</span>
                   <span style={{ textAlign: 'center' }}>Sess.</span>
-                  {mode === 'custom' && <span>Difficulty (1–10)</span>}
                 </div>
 
                 {sortSubjects(cls.subjects).map((s, si) => (
                   <div key={si} style={{
                     display: 'grid',
-                    gridTemplateColumns: mode === 'custom' ? '1fr 140px 52px 1fr' : '1fr 140px 52px',
+                    gridTemplateColumns: '1fr 140px 52px',
                     gap: 8, alignItems: 'center', padding: '6px 0',
                     borderBottom: si < cls.subjects.length - 1 ? '1px solid var(--c-border)' : 'none',
                   }}>
@@ -317,9 +211,6 @@ export default function CustomizePage({ classes: initialClasses, teachers, onCon
                     <span style={{ fontSize: 13, textAlign: 'center', color: 'var(--c-ink-2)' }}>
                       {s.sessions_per_week}
                     </span>
-                    {mode === 'custom' && (
-                      <RelevancePicker value={s.relevance} onChange={v => setRelevance(cls.name, s.name, v)} />
-                    )}
                   </div>
                 ))}
               </CollapseCard>
@@ -490,21 +381,6 @@ function SectionLabel({ children }) {
     }}>
       {children}
     </p>
-  )
-}
-
-function ToggleRow({ label, desc, on, onChange }) {
-  return (
-    <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      gap: 12, padding: '10px 0',
-    }}>
-      <div>
-        <div style={{ fontSize: 13 }}>{label}</div>
-        {desc && <div style={{ fontSize: 12, color: 'var(--c-ink-3)', marginTop: 2 }}>{desc}</div>}
-      </div>
-      <Toggle on={on} onChange={onChange} />
-    </div>
   )
 }
 

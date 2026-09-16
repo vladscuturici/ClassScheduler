@@ -1,22 +1,51 @@
 ﻿// pages/ScheduleViewPage.jsx
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useStore } from '../store'
-import { getSchedule, performSwap, exportTeacherSchedule, exportClassSchedules, saveProjectFile, mergeConstraintsIntoPayload } from '../api'
+import { getSchedule, getSwapCandidates, performSwap, exportTeacherSchedule, exportClassSchedules, saveProjectFile, mergeConstraintsIntoPayload } from '../api'
 
-const DAYS      = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
-const DAY_FULL  = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-const HOURS     = 8
+const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
+const DAY_FULL = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+const HOURS = 8
 const ALL_TEACHERS = '__all__'
 
+// ── Romanian day names + hour-to-clock-time helper ────────────────────────────
+const DAY_RO = ['Luni', 'Marti', 'Miercuri', 'Joi', 'Vineri']
+
+// H1 = 8:00, H2 = 9:00, etc. Adjust START_HOUR if your school day starts differently.
+const START_HOUR = 8
+function hourLabel(h) {
+  return `${START_HOUR + h}:00`
+}
+
+// ── per-hour background tint ──────────────────────────────────────────────
+// H1-H4: light blue, H5: light purple, H6: light green, H7: light yellow, H8: light red
+const HOUR_BG = [
+  'rgba(59,130,246,0.09)',  // H1
+  'rgba(59,130,246,0.09)',  // H2
+  'rgba(59,130,246,0.09)',  // H3
+  'rgba(59,130,246,0.09)',  // H4
+  'rgba(147,51,234,0.09)',  // H5
+  'rgba(34,197,94,0.09)',   // H6
+  'rgba(234,179,8,0.12)',   // H7
+  'rgba(239,68,68,0.09)',   // H8
+]
+function hourBg(h) {
+  return HOUR_BG[h] ?? 'var(--c-bg)'
+}
+
+// ── visible separator between day columns ─────────────────────────────────
+const DAY_SEPARATOR = '3px solid #64748b'
+
+
 const SUBJECT_COLORS = [
-  { bg: 'rgba(43,92,230,0.10)',  border: 'rgba(43,92,230,0.30)',  text: '#1a3a9a' },
-  { bg: 'rgba(30,124,77,0.10)', border: 'rgba(30,124,77,0.30)',  text: '#0d5c38' },
-  { bg: 'rgba(180,80,0,0.10)',  border: 'rgba(180,80,0,0.30)',   text: '#7a3600' },
-  { bg: 'rgba(120,40,160,0.10)',border: 'rgba(120,40,160,0.30)', text: '#5a1a80' },
+  { bg: 'rgba(43,92,230,0.10)', border: 'rgba(43,92,230,0.30)', text: '#1a3a9a' },
+  { bg: 'rgba(30,124,77,0.10)', border: 'rgba(30,124,77,0.30)', text: '#0d5c38' },
+  { bg: 'rgba(180,80,0,0.10)', border: 'rgba(180,80,0,0.30)', text: '#7a3600' },
+  { bg: 'rgba(120,40,160,0.10)', border: 'rgba(120,40,160,0.30)', text: '#5a1a80' },
   { bg: 'rgba(0,130,150,0.10)', border: 'rgba(0,130,150,0.30)', text: '#005a6a' },
   { bg: 'rgba(180,30,60,0.10)', border: 'rgba(180,30,60,0.30)', text: '#7a1030' },
   { bg: 'rgba(100,100,0,0.10)', border: 'rgba(100,100,0,0.30)', text: '#4a4a00' },
-  { bg: 'rgba(0,80,160,0.10)',  border: 'rgba(0,80,160,0.30)',  text: '#003880' },
+  { bg: 'rgba(0,80,160,0.10)', border: 'rgba(0,80,160,0.30)', text: '#003880' },
 ]
 
 function subjectColor(name) {
@@ -41,8 +70,13 @@ function abbrev(subject) {
 }
 
 // ── grade helpers ─────────────────────────────────────────────────────────────
+// Class names are either "<number><version>" (e.g. "1A", "2B") for grades 1+,
+// or "P<version>" (e.g. "PA", "PB") for the prep/kindergarten grade — treated
+// as grade 0. Anything else falls back to 99 (treated as high-grade/unknown).
 function classGrade(className) {
-  const m = String(className).match(/^(\d+)/)
+  const s = String(className).trim()
+  if (/^P/i.test(s)) return 0
+  const m = s.match(/^(\d+)/)
   return m ? parseInt(m[1], 10) : 99
 }
 function isLowGrade(className) { return classGrade(className) <= 4 }
@@ -57,13 +91,13 @@ function isLowGrade(className) { return classGrade(className) <= 4 }
 function analyzeSwap(grids, selected, candidate) {
   if (!grids || !selected || !candidate) return { warnings: [], notes: [] }
 
-  const cs   = grids.class_schedules
-  const ts   = grids.teacher_schedules
-  const selCls  = selected.className
-  const canCls  = candidate.class_name
-  const selDay  = selected.day
+  const cs = grids.class_schedules
+  const ts = grids.teacher_schedules
+  const selCls = selected.className
+  const canCls = candidate.class_name
+  const selDay = selected.day
   const selHour = selected.hour
-  const canDay  = candidate.day
+  const canDay = candidate.day
   const canHour = candidate.hour
 
   // ── build post-swap class schedule snapshots ──────────────────────────────
@@ -75,8 +109,8 @@ function analyzeSwap(grids, selected, candidate) {
 
   // The two slots that move: selected slot ↔ candidate slot
   // selected slot content (must exist, user clicked it)
-  const selSlot  = cs[selCls]?.[selDay]?.[selHour] ?? null
-  const canSlot  = cs[canCls]?.[canDay]?.[canHour] ?? null
+  const selSlot = cs[selCls]?.[selDay]?.[selHour] ?? null
+  const canSlot = cs[canCls]?.[canDay]?.[canHour] ?? null
 
   // Build post-swap snapshots for each affected (class, day)
   // Key: `cls-day` → slot[]
@@ -122,8 +156,8 @@ function analyzeSwap(grids, selected, candidate) {
   // Find teachers involved: derive from the actual slot data, not from selected.teacher
   // (selected.teacher can be the row-context teacher from an empty-tile click, not the
   // teacher of the lesson that will actually move — selSlot.teacher is authoritative)
-  const selTeacher  = selSlot?.teacher ?? null
-  const canTeacher  = canSlot?.teacher ?? null
+  const selTeacher = selSlot?.teacher ?? null
+  const canTeacher = canSlot?.teacher ?? null
   const teachersAffected = new Set([selTeacher, canTeacher].filter(Boolean))
 
   // Post-swap teacher day snapshots
@@ -153,7 +187,7 @@ function analyzeSwap(grids, selected, candidate) {
       snapA[selHour] = snapB[canHour]
       snapB[canHour] = tmp
       tSnaps[`${selTeacher}-${selDay}`] = snapA
-      tSnaps[`${selTeacher}-${canDay}`]  = snapB
+      tSnaps[`${selTeacher}-${canDay}`] = snapB
     }
   } else {
     if (selTeacher) {
@@ -187,7 +221,7 @@ function analyzeSwap(grids, selected, candidate) {
 
   // ── analysis helpers ──────────────────────────────────────────────────────
   const warnings = []
-  const notes    = []
+  const notes = []
 
   // Helper: given a clsSnaps key, find the matching class name and day index.
   // Sort longest-first so "10A" is tried before "10" — prevents prefix ambiguity
@@ -224,6 +258,27 @@ function analyzeSwap(grids, selected, candidate) {
     }
   }
 
+  // 1b. Late start — swap pushes the class's first lesson of the day later,
+  // even when it introduces no internal gap (e.g. day collapses to H7-H8 only).
+  // Skips low grades (0-4): their schedules are just opportunistic slots filled
+  // in as teacher availability allows, not a finalized fixed-start schedule, so
+  // a shifting "first lesson" isn't a meaningful regression yet.
+  for (const [key, snap] of Object.entries(clsSnaps)) {
+    const parsed = parseClsKey(key)
+    if (!parsed) continue
+    if (isLowGrade(parsed.cls)) continue
+    const priorFilled = clsDaySnap(parsed.cls, parsed.day).map(s => s !== null)
+    const afterFilled = snap.map(s => s !== null)
+    const priorFirst = priorFilled.indexOf(true)
+    const afterFirst = afterFilled.indexOf(true)
+    if (priorFirst !== -1 && afterFirst > priorFirst) {
+      warnings.push(
+        `Class ${parsed.cls} now starts later on ${DAY_FULL[parsed.day]} ` +
+        `(H${afterFirst + 1} vs H${priorFirst + 1})`
+      )
+    }
+  }
+
   // 2. Same subject non-consecutive in a day — only warn if swap INTRODUCES a new split
   function subjectSplits(snap) {
     // Returns a Set of subject names that appear in 2+ non-consecutive blocks
@@ -246,9 +301,9 @@ function analyzeSwap(grids, selected, candidate) {
   for (const [key, snap] of Object.entries(clsSnaps)) {
     const parsed = parseClsKey(key)
     if (!parsed) continue
-    const priorSnap  = clsDaySnap(parsed.cls, parsed.day)
+    const priorSnap = clsDaySnap(parsed.cls, parsed.day)
     const before = subjectSplits(priorSnap)
-    const after  = subjectSplits(snap)
+    const after = subjectSplits(snap)
     for (const subj of after) {
       if (!before.has(subj)) {
         warnings.push(`Class ${parsed.cls} now has ${subj} split across non-consecutive hours on ${DAY_FULL[parsed.day]}`)
@@ -279,7 +334,7 @@ function analyzeSwap(grids, selected, candidate) {
     // Compare post-swap max run to pre-swap max run for the same (class, day)
     const priorSnap = clsDaySnap(parsed.cls, parsed.day) // original, before swap
     const before = maxConsecRun(priorSnap)
-    const after  = maxConsecRun(snap)
+    const after = maxConsecRun(snap)
     if (after > MAX_CONSECUTIVE_SUBJ && after > before) {
       // Find which subject is now running too long
       let prev = null, run = 0, worstSubj = null, worstRun = 0
@@ -335,7 +390,7 @@ function analyzeSwap(grids, selected, candidate) {
 
   for (const teacher of teachersAffected) {
     const before = teacherCurrentMaxGap(teacher)
-    const after  = teacherGapAfterSwap(teacher)
+    const after = teacherGapAfterSwap(teacher)
     if (after > before) {
       notes.push(`${teacher}'s gap increases from ${before} to ${after} hour${after !== 1 ? 's' : ''}`)
     }
@@ -355,7 +410,7 @@ function annotateCandidate(candidate, grids, selected) {
 
   // Build the effective "selected" and "candidate" for analyzeSwap.
   // When an empty slot was clicked first, the candidate is the filled slot (source)
-  // and selected is the empty destination — swap the perspective so analyzeSwap
+  // and selected is the empty target — swap the perspective so analyzeSwap
   // always sees a filled selSlot.
   let effectiveSelected, effectiveCandidate
   if (selected.isEmpty) {
@@ -363,17 +418,17 @@ function annotateCandidate(candidate, grids, selected) {
     // Don't forward selected.teacher — analyzeSwap now reads teacher from selSlot directly
     effectiveSelected = {
       className: candidate.class_name,
-      day:       candidate.day,
-      hour:      candidate.hour,
+      day: candidate.day,
+      hour: candidate.hour,
     }
     effectiveCandidate = {
       ...candidate,
       class_name: candidate.class_name,
-      day:        selected.day,
-      hour:       selected.hour,
+      day: selected.day,
+      hour: selected.hour,
     }
   } else {
-    effectiveSelected  = selected
+    effectiveSelected = selected
     effectiveCandidate = candidate
   }
 
@@ -426,44 +481,44 @@ function annotateCandidate(candidate, grids, selected) {
 
 const IconBack = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+    <line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" />
   </svg>
 )
 const IconExport = () => (
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
   </svg>
 )
 const IconEdit = () => (
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
   </svg>
 )
 const IconClose = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
   </svg>
 )
 const IconStats = () => (
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+    <line x1="18" y1="20" x2="18" y2="10" /><line x1="12" y1="20" x2="12" y2="4" /><line x1="6" y1="20" x2="6" y2="14" />
   </svg>
 )
 const IconSave = () => (
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
-    <polyline points="17 21 17 13 7 13 7 21"/>
-    <polyline points="7 3 7 8 15 8"/>
+    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+    <polyline points="17 21 17 13 7 13 7 21" />
+    <polyline points="7 3 7 8 15 8" />
   </svg>
 )
 
 function Pill({ children, color = 'blue' }) {
   const map = {
-    blue:  { bg: 'rgba(43,92,230,.10)',  text: 'var(--c-accent)' },
-    green: { bg: 'rgba(30,124,77,.10)',  text: 'var(--c-success)' },
-    gray:  { bg: 'rgba(0,0,0,.07)',      text: 'var(--c-ink-2)' },
-    red:   { bg: 'rgba(192,57,43,.10)',  text: 'var(--c-danger)' },
-    amber: { bg: 'rgba(180,120,0,.10)',  text: '#7a5000' },
+    blue: { bg: 'rgba(43,92,230,.10)', text: 'var(--c-accent)' },
+    green: { bg: 'rgba(30,124,77,.10)', text: 'var(--c-success)' },
+    gray: { bg: 'rgba(0,0,0,.07)', text: 'var(--c-ink-2)' },
+    red: { bg: 'rgba(192,57,43,.10)', text: 'var(--c-danger)' },
+    amber: { bg: 'rgba(180,120,0,.10)', text: '#7a5000' },
   }
   const s = map[color] || map.gray
   return (
@@ -478,8 +533,8 @@ function Spinner({ size = 18 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="var(--c-accent)" strokeWidth="2.5" strokeLinecap="round">
       <style>{`@keyframes _sp{to{transform:rotate(360deg)}}`}</style>
-      <circle cx="12" cy="12" r="9" strokeOpacity="0.2"/>
-      <path d="M12 3a9 9 0 0 1 9 9" style={{ animation:'_sp 0.8s linear infinite', transformOrigin:'12px 12px' }}/>
+      <circle cx="12" cy="12" r="9" strokeOpacity="0.2" />
+      <path d="M12 3a9 9 0 0 1 9 9" style={{ animation: '_sp 0.8s linear infinite', transformOrigin: '12px 12px' }} />
     </svg>
   )
 }
@@ -511,7 +566,7 @@ function ViolationTooltip({ violations, style, onClick, children }) {
             borderLeft: '5px solid transparent',
             borderRight: '5px solid transparent',
             borderTop: '5px solid var(--c-ink)',
-          }}/>
+          }} />
         </div>
       )}
     </td>
@@ -519,6 +574,13 @@ function ViolationTooltip({ violations, style, onClick, children }) {
 }
 
 // ── shared cell highlight logic ───────────────────────────────────────────────
+// A candidate is blocked specifically because a teacher is unavailable at
+// that slot (vs. some other kind of hard conflict) — shown black, not red.
+function isUnavailabilityBlock(candidate) {
+  if (!candidate?.violated_constraints?.length) return false
+  return candidate.violated_constraints.some(v => /unavailable/i.test(v))
+}
+
 function getCellStyle({ editMode, slot, selected, isSelected, isCandidate, candidate, hasContent }) {
   let cellExtra = {}
   let cursor = 'default'
@@ -537,9 +599,13 @@ function getCellStyle({ editMode, slot, selected, isSelected, isCandidate, candi
     } else if (candidate.status === 'teacher_gap_warning') {
       cellExtra = { boxShadow: 'inset 0 0 0 3px #7c3aed', background: 'rgba(124,58,237,0.18)' }
     } else if (candidate.status === 'valid') {
-      cellExtra = { boxShadow: 'inset 0 0 0 3px var(--c-success)', background: 'rgba(30,124,77,0.38)' }
+      // Swappable — noticeable green
+      cellExtra = { boxShadow: 'inset 0 0 0 3px #16a34a', background: 'rgba(22,163,74,0.45)' }
     } else if (candidate.status === 'soft_violation') {
       cellExtra = { boxShadow: 'inset 0 0 0 3px #e0a020', background: 'rgba(180,130,0,0.32)' }
+    } else if (isUnavailabilityBlock(candidate)) {
+      // Unavailable — black
+      cellExtra = { boxShadow: 'inset 0 0 0 3px #000000', background: 'rgba(0,0,0,0.30)' }
     } else {
       cellExtra = { boxShadow: 'inset 0 0 0 3px var(--c-danger)', background: 'rgba(192,57,43,0.30)' }
     }
@@ -563,7 +629,10 @@ function ClassScheduleGrid({ schedule, className, editMode, selected, onSelect, 
           <tr>
             <th style={{ width: 52, ...thStyle }}></th>
             {DAYS.map((d, di) => (
-              <th key={d} style={{ ...thStyle, textAlign: 'center', fontWeight: 600 }}>
+              <th key={d} style={{
+                ...thStyle, textAlign: 'center', fontWeight: 600,
+                borderLeft: di > 0 ? DAY_SEPARATOR : undefined,
+              }}>
                 <div style={{ fontSize: 12 }}>{d}</div>
                 <div style={{ fontSize: 10, fontWeight: 400, color: 'var(--c-ink-3)' }}>{DAY_FULL[di]}</div>
               </th>
@@ -577,11 +646,11 @@ function ClassScheduleGrid({ schedule, className, editMode, selected, onSelect, 
                 H{h + 1}
               </td>
               {DAYS.map((_, di) => {
-                const slot        = schedule?.[di]?.[h]
-                const key         = `${di}-${h}`
-                const isSelected  = selected?.day === di && selected?.hour === h && selected?.className === className &&
+                const slot = schedule?.[di]?.[h]
+                const key = `${di}-${h}`
+                const isSelected = selected?.day === di && selected?.hour === h && selected?.className === className &&
                   (selected.isEmpty ? !slot : true)
-                let candidate   = annotateCandidate(candidateMap[key], grids, selected)
+                let candidate = annotateCandidate(candidateMap[key], grids, selected)
                 const isCandidate = !!candidate
                 const { cellExtra, cursor } = getCellStyle({ editMode, slot, selected, isSelected, isCandidate, candidate, hasContent: !!slot })
 
@@ -599,10 +668,16 @@ function ClassScheduleGrid({ schedule, className, editMode, selected, onSelect, 
                     <div style={{ fontSize: 10, color: 'var(--c-ink-3)', lineHeight: 1.2 }}>{slot.teacher}</div>
                   </div>
                 ) : (
-                  <div style={{ height: '100%', background: 'var(--c-bg)', borderRadius: 6 }}/>
+                  <div style={{ height: '100%', background: 'transparent', borderRadius: 6 }} />
                 )
 
-                const tdStyle_ = { ...tdStyle, padding: 3, height: 52, cursor, transition: 'background 0.1s, box-shadow 0.1s', ...cellExtra }
+                const tdStyle_ = {
+                  ...tdStyle, padding: 3, height: 52, cursor,
+                  transition: 'background 0.1s, box-shadow 0.1s',
+                  background: hourBg(h),
+                  borderLeft: di > 0 ? DAY_SEPARATOR : undefined,
+                  ...cellExtra,
+                }
 
                 if (editMode && selected && isCandidate && candidate.violated_constraints?.length) {
                   return (
@@ -636,7 +711,10 @@ function TeacherScheduleGrid({ schedule, teacherName, editMode, selected, onSele
           <tr>
             <th style={{ width: 52, ...thStyle }}></th>
             {DAYS.map((d, di) => (
-              <th key={d} style={{ ...thStyle, textAlign: 'center', fontWeight: 600 }}>
+              <th key={d} style={{
+                ...thStyle, textAlign: 'center', fontWeight: 600,
+                borderLeft: di > 0 ? DAY_SEPARATOR : undefined,
+              }}>
                 <div style={{ fontSize: 12 }}>{d}</div>
                 <div style={{ fontSize: 10, fontWeight: 400, color: 'var(--c-ink-3)' }}>{DAY_FULL[di]}</div>
               </th>
@@ -651,13 +729,13 @@ function TeacherScheduleGrid({ schedule, teacherName, editMode, selected, onSele
               </td>
               {DAYS.map((_, di) => {
                 // slot is { class_name, subject } or null
-                const slot         = schedule?.[di]?.[h]
-                const className    = slot?.class_name ?? null
-                const isSelected   = selected?.day === di && selected?.hour === h && selected?.teacher === teacherName &&
+                const slot = schedule?.[di]?.[h]
+                const className = slot?.class_name ?? null
+                const isSelected = selected?.day === di && selected?.hour === h && selected?.teacher === teacherName &&
                   (selected.isEmpty ? !slot : selected?.className === className)
                 const candidateKey = `${className}-${di}-${h}`
-                let candidate    = annotateCandidate(candidateMap[candidateKey], grids, selected)
-                const isCandidate  = !!candidate && !!className
+                let candidate = annotateCandidate(candidateMap[candidateKey], grids, selected)
+                const isCandidate = !!candidate && !!className
                 const { cellExtra, cursor } = getCellStyle({ editMode, selected, isSelected, isCandidate, candidate, hasContent: !!slot })
 
                 const handleClick = () => {
@@ -666,7 +744,7 @@ function TeacherScheduleGrid({ schedule, teacherName, editMode, selected, onSele
                   if (selected && isCandidate) { if (candidate.status !== 'invalid') onSwap(candidate); return }
                   if (!selected) {
                     if (slot) onSelect({ className, day: di, hour: h, teacher: teacherName })
-                    else      onSelect({ className: null, day: di, hour: h, teacher: teacherName, isEmpty: true })
+                    else onSelect({ className: null, day: di, hour: h, teacher: teacherName, isEmpty: true })
                   }
                 }
 
@@ -682,10 +760,16 @@ function TeacherScheduleGrid({ schedule, teacherName, editMode, selected, onSele
                     <span style={{ fontSize: 10, color: col.text, opacity: 0.8, lineHeight: 1.2, textAlign: 'center' }}>{slot.subject}</span>
                   </div>
                 ) : (
-                  <div style={{ height: '100%', background: 'var(--c-bg)', borderRadius: 6 }}/>
+                  <div style={{ height: '100%', background: 'transparent', borderRadius: 6 }} />
                 )
 
-                const tdStyle_ = { ...tdStyle, padding: 3, height: 56, cursor, transition: 'background 0.1s, box-shadow 0.1s', ...cellExtra }
+                const tdStyle_ = {
+                  ...tdStyle, padding: 3, height: 56, cursor,
+                  transition: 'background 0.1s, box-shadow 0.1s',
+                  background: hourBg(h),
+                  borderLeft: di > 0 ? DAY_SEPARATOR : undefined,
+                  ...cellExtra,
+                }
 
                 if (editMode && selected && isCandidate && candidate?.violated_constraints?.length) {
                   return (
@@ -715,8 +799,8 @@ function AllTeachersGrid({ grids, editMode, selected, onSelect, swapCandidates, 
   // or empty slots of the same teacher.
   // When an EMPTY slot is selected (isEmpty), candidates are the teacher's own filled slots.
   const filledCandidateMap = {}  // key: `${class_name}-${day}-${hour}` → candidate (filled source/target)
-  const emptyTargetMap    = {}   // key: `${teacher}-${day}-${hour}`    → candidate (empty target for same-teacher)
-  const emptySourceMap    = {}   // key: `${class_name}-${day}-${hour}` → candidate (filled source when empty selected)
+  const emptyTargetMap = {}   // key: `${teacher}-${day}-${hour}`    → candidate (empty target for same-teacher)
+  const emptySourceMap = {}   // key: `${class_name}-${day}-${hour}` → candidate (filled source when empty selected)
 
   if (swapCandidates && selected) {
     if (selected.isEmpty) {
@@ -756,7 +840,7 @@ function AllTeachersGrid({ grids, editMode, selected, onSelect, swapCandidates, 
               Array.from({ length: HOURS }, (_, h) => (
                 <th key={`${di}-${h}`} style={{
                   ...thStyle, width: 42, textAlign: 'center',
-                  borderLeft: h === 0 ? '2px solid var(--c-border)' : undefined,
+                  borderLeft: h === 0 ? DAY_SEPARATOR : undefined,
                   paddingTop: h === 0 ? 4 : 8,
                 }}>
                   {h === 0
@@ -830,7 +914,7 @@ function AllTeachersGrid({ grids, editMode, selected, onSelect, swapCandidates, 
                       if (selected && isCandidate) { if (candidate.status !== 'invalid') onSwap(candidate); return }
                       if (!selected) {
                         if (slot) onSelect({ className, day: di, hour: h, teacher })
-                        else      onSelect({ className: null, day: di, hour: h, teacher, isEmpty: true })
+                        else onSelect({ className: null, day: di, hour: h, teacher, isEmpty: true })
                       }
                     }
 
@@ -838,7 +922,8 @@ function AllTeachersGrid({ grids, editMode, selected, onSelect, swapCandidates, 
                     const col = slot ? subjectColor(className) : null
                     const cellContent = slot ? (
                       <div style={{
-                        background: col.bg, border: `1px solid ${col.border}`,
+                        background: col.bg,
+                        border: `${isLowGrade(className) ? '1px dashed' : '2px solid'} ${col.border}`,
                         borderRadius: 4, height: '100%',
                         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1,
                       }}>
@@ -846,14 +931,15 @@ function AllTeachersGrid({ grids, editMode, selected, onSelect, swapCandidates, 
                         <span style={{ fontSize: 9, color: col.text, opacity: 0.75, lineHeight: 1.1 }}>{abbrev(slot.subject)}</span>
                       </div>
                     ) : (
-                      <div style={{ height: '100%', background: 'var(--c-bg)', borderRadius: 4 }}/>
+                      <div style={{ height: '100%', background: 'transparent', borderRadius: 4 }} />
                     )
 
                     const tdStyle_ = {
                       ...tdStyle, padding: 2, height: 38, width: 42,
                       cursor, transition: 'background 0.1s, box-shadow 0.1s',
+                      background: hourBg(h),
+                      borderLeft: h === 0 ? DAY_SEPARATOR : undefined,
                       ...cellExtra,
-                      borderLeft: h === 0 ? '2px solid var(--c-border)' : undefined,
                     }
 
                     if (editMode && selected && isCandidate && candidate?.violated_constraints?.length) {
@@ -924,7 +1010,7 @@ function StatsPanel({ grids }) {
               {st.perDay.map((count, di) => (
                 <div key={di} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
                   <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--c-ink-2)' }}>{count}</div>
-                  <div style={{ width: '100%', borderRadius: 3, height: Math.max(4, count * 10), background: count === st.max ? 'var(--c-accent)' : count === st.min && count > 0 ? 'var(--c-success)' : 'var(--c-border-h)', transition: 'height 0.3s' }}/>
+                  <div style={{ width: '100%', borderRadius: 3, height: Math.max(4, count * 10), background: count === st.max ? 'var(--c-accent)' : count === st.min && count > 0 ? 'var(--c-success)' : 'var(--c-border-h)', transition: 'height 0.3s' }} />
                   <div style={{ fontSize: 10, color: 'var(--c-ink-3)' }}>{DAYS[di]}</div>
                 </div>
               ))}
@@ -951,32 +1037,45 @@ function exportCSV(grids) {
   if (!grids) return
   const { class_schedules, teacher_schedules } = grids
 
-  const classRows = ['Class,Day,Hour,Subject,Teacher']
+  // combined class schedule (unchanged structure, translated headers/values)
+  const classRows = ['Clasă,Zi,Ora,Materie,Profesor']
   Object.entries(class_schedules).forEach(([cls, sched]) => {
     for (let d = 0; d < 5; d++)
       for (let h = 0; h < HOURS; h++) {
         const s = sched[d][h]
-        if (s) classRows.push(`${cls},${DAY_FULL[d]},${h+1},${s.subject},${s.teacher}`)
+        if (s) classRows.push(`${cls},${DAY_RO[d]},${hourLabel(h)},${s.subject},${s.teacher}`)
       }
   })
-  downloadBlob(classRows.join('\n'), 'class_schedules.csv', 'text/csv')
+  downloadBlob(classRows.join('\n'), 'orare_clase.csv', 'text/csv')
 
-  // teacher_schedules slots are now { class_name, subject }
-  const teacherRows = ['Teacher,Day,Hour,Class,Subject']
+  // combined teacher schedule (unchanged structure, translated headers/values)
+  const teacherRows = ['Profesor,Zi,Ora,Clasă,Materie']
   Object.entries(teacher_schedules).forEach(([teacher, sched]) => {
     for (let d = 0; d < 5; d++)
       for (let h = 0; h < HOURS; h++) {
         const slot = sched[d][h]
-        if (slot) teacherRows.push(`${teacher},${DAY_FULL[d]},${h+1},${slot.class_name},${slot.subject}`)
+        if (slot) teacherRows.push(`${teacher},${DAY_RO[d]},${hourLabel(h)},${slot.class_name},${slot.subject}`)
       }
   })
-  downloadBlob(teacherRows.join('\n'), 'teacher_schedules.csv', 'text/csv')
+  downloadBlob(teacherRows.join('\n'), 'orare_profesori.csv', 'text/csv')
+
+  // NEW: one individual CSV per teacher, same shape as the per-class breakdown
+  Object.entries(teacher_schedules).forEach(([teacher, sched]) => {
+    const rows = ['Zi,Ora,Clasă,Materie']
+    for (let d = 0; d < 5; d++)
+      for (let h = 0; h < HOURS; h++) {
+        const slot = sched[d][h]
+        if (slot) rows.push(`${DAY_RO[d]},${hourLabel(h)},${slot.class_name},${slot.subject}`)
+      }
+    const safeName = teacher.replace(/[^\w\-]+/g, '_')
+    downloadBlob(rows.join('\n'), `orar_${safeName}.csv`, 'text/csv')
+  })
 }
 
 function downloadBlob(content, filename, type) {
   const blob = new Blob([content], { type })
-  const url  = URL.createObjectURL(blob)
-  const a    = document.createElement('a')
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
   a.href = url; a.download = filename; a.click()
   URL.revokeObjectURL(url)
 }
@@ -1000,23 +1099,27 @@ function SwapLegend() {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 14, fontSize: 11, color: 'var(--c-ink-3)', flexWrap: 'wrap' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-        <div style={{ width: 12, height: 12, borderRadius: 3, boxShadow: 'inset 0 0 0 2px var(--c-success)', background: 'rgba(30,124,77,0.38)' }}/>
+        <div style={{ width: 12, height: 12, borderRadius: 3, boxShadow: 'inset 0 0 0 2px #16a34a', background: 'rgba(22,163,74,0.45)' }} />
         Valid swap
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-        <div style={{ width: 12, height: 12, borderRadius: 3, boxShadow: 'inset 0 0 0 2px #c8970a', background: 'rgba(200,151,10,0.22)' }}/>
+        <div style={{ width: 12, height: 12, borderRadius: 3, boxShadow: 'inset 0 0 0 2px #c8970a', background: 'rgba(200,151,10,0.22)' }} />
         Schedule quality issue (hover for details)
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-        <div style={{ width: 12, height: 12, borderRadius: 3, boxShadow: 'inset 0 0 0 2px #7c3aed', background: 'rgba(124,58,237,0.18)' }}/>
+        <div style={{ width: 12, height: 12, borderRadius: 3, boxShadow: 'inset 0 0 0 2px #7c3aed', background: 'rgba(124,58,237,0.18)' }} />
         Teacher gap increases (hover for details)
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-        <div style={{ width: 12, height: 12, borderRadius: 3, boxShadow: 'inset 0 0 0 2px #e0a020', background: 'rgba(180,130,0,0.32)' }}/>
+        <div style={{ width: 12, height: 12, borderRadius: 3, boxShadow: 'inset 0 0 0 2px #e0a020', background: 'rgba(180,130,0,0.32)' }} />
         Soft constraint violation (hover for details)
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-        <div style={{ width: 12, height: 12, borderRadius: 3, boxShadow: 'inset 0 0 0 2px var(--c-danger)', background: 'rgba(192,57,43,0.30)' }}/>
+        <div style={{ width: 12, height: 12, borderRadius: 3, boxShadow: 'inset 0 0 0 2px #000000', background: 'rgba(0,0,0,0.30)' }} />
+        Teacher unavailable
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+        <div style={{ width: 12, height: 12, borderRadius: 3, boxShadow: 'inset 0 0 0 2px var(--c-danger)', background: 'rgba(192,57,43,0.30)' }} />
         Cannot swap
       </div>
     </div>
@@ -1025,8 +1128,14 @@ function SwapLegend() {
 
 // ── grade sort helper ─────────────────────────────────────────────────────────
 function gradeKey(name) {
-  const m = String(name).match(/^(\d+)([A-Za-z]*)$/)
-  if (!m) return { bucket: 1, grade: 0, variant: String(name).toUpperCase() }
+  const s = String(name).trim()
+  if (/^P/i.test(s)) {
+    // Prep/kindergarten class, e.g. "PA", "PB" — treat as grade 0
+    const variant = s.slice(1).toUpperCase()
+    return { bucket: 3, grade: 0, variant }
+  }
+  const m = s.match(/^(\d+)([A-Za-z]*)$/)
+  if (!m) return { bucket: 1, grade: 0, variant: s.toUpperCase() }
   const grade = parseInt(m[1], 10)
   const variant = m[2].toUpperCase()
   const bucket = grade >= 5 ? 0 : grade >= 1 ? 2 : 3
@@ -1037,7 +1146,7 @@ function sortClasses(names) {
   return [...names].sort((a, b) => {
     const A = gradeKey(a), B = gradeKey(b)
     if (A.bucket !== B.bucket) return A.bucket - B.bucket
-    if (A.grade  !== B.grade)  return A.grade  - B.grade
+    if (A.grade !== B.grade) return A.grade - B.grade
     return A.variant.localeCompare(B.variant)
   })
 }
@@ -1055,17 +1164,19 @@ export default function ScheduleViewPage({
   const sessionId = sessionIdProp ?? parsedData?.session_id
   const [saveState, setSaveState] = useState('idle') // idle | saved
 
-  const [grids,         setGrids]         = useState(null)
-  const [loading,       setLoading]       = useState(true)
-  const [error,         setError]         = useState(null)
-  const [viewMode,      setViewMode]      = useState('classes')
-  const [activeClass,   setActiveClass]   = useState(null)
+  const [grids, setGrids] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [viewMode, setViewMode] = useState('classes')
+  const [activeClass, setActiveClass] = useState(null)
   const [activeTeacher, setActiveTeacher] = useState(ALL_TEACHERS)
-  const [showStats,     setShowStats]     = useState(false)
-  const [editMode,      setEditMode]      = useState(false)
-  const [selected,      setSelected]      = useState(null)
-  const [candidates,    setCandidates]    = useState(null)
-  const [swapping,      setSwapping]      = useState(false)
+  const [showStats, setShowStats] = useState(false)
+  const [editMode, setEditMode] = useState(false)
+  const [selected, setSelected] = useState(null)
+  const [candidates, setCandidates] = useState(null)
+  const [swapping, setSwapping] = useState(false)
+  const [swapError, setSwapError] = useState(null)
+  const [showBackConfirm, setShowBackConfirm] = useState(false)
 
   useEffect(() => {
     if (!sessionId) return
@@ -1082,61 +1193,74 @@ export default function ScheduleViewPage({
 
   useEffect(() => {
     if (!selected || !sessionId) { setCandidates(null); return }
+    let cancelled = false
 
     if (selected.isEmpty) {
-      // Empty tile selected as move target.
+      // Empty tile selected as move target. Find every filled lesson that
+      // could plausibly move here (same teacher, or same class), then ask
+      // the backend — via getSwapCandidates — whether each one is actually
+      // valid to place at (selected.day, selected.hour). We no longer mark
+      // anything 'valid' without a real backend check.
+      const sourceSlots = []
       if (selected.teacher) {
-        // Teacher view: all filled slots of this teacher are potential sources.
-        // We list them as valid candidates; the backend will enforce actual constraints on performSwap.
         const teacherSched = grids?.teacher_schedules?.[selected.teacher]
         if (!teacherSched) { setCandidates(null); return }
-
-        const syntheticCandidates = []
         for (let d = 0; d < 5; d++) {
           for (let h = 0; h < HOURS; h++) {
             const s = teacherSched[d]?.[h]
-            if (s) syntheticCandidates.push({
-              class_name: s.class_name,
-              day: d,
-              hour: h,
-              status: 'valid',
-              violated_constraints: [],
-            })
+            if (s) sourceSlots.push({ class_name: s.class_name, day: d, hour: h })
           }
         }
-        setCandidates(syntheticCandidates)
       } else {
-        // Class view empty tile: all filled slots of that class are potential sources.
         const className = selected.className
         const sched = grids?.class_schedules?.[className]
         if (!sched) { setCandidates(null); return }
-
-        const syntheticCandidates = []
         for (let d = 0; d < 5; d++) {
           for (let h = 0; h < HOURS; h++) {
-            if (sched[d]?.[h]) syntheticCandidates.push({
-              class_name: className,
-              day: d,
-              hour: h,
-              status: 'valid',
-              violated_constraints: [],
-            })
+            if (sched[d]?.[h]) sourceSlots.push({ class_name: className, day: d, hour: h })
           }
         }
-        setCandidates(syntheticCandidates)
       }
-      return
+
+      if (sourceSlots.length === 0) { setCandidates([]); return }
+
+      Promise.all(
+        sourceSlots.map(src =>
+          getSwapCandidates(sessionId, src.class_name, src.day, src.hour)
+            .then(list => {
+              // The candidates list is keyed by TARGET (class_name/day/hour).
+              // A move into an empty slot keeps the same class, just at a
+              // different day/hour — so look up the entry for src.class_name
+              // at (selected.day, selected.hour).
+              const match = list.find(c =>
+                c.class_name === src.class_name &&
+                c.day === selected.day &&
+                c.hour === selected.hour
+              )
+              return {
+                class_name: src.class_name,
+                day: src.day,
+                hour: src.hour,
+                status: match?.status ?? 'invalid',
+                violated_constraints: match?.violated_constraints ?? [],
+              }
+            })
+            .catch(() => ({
+              class_name: src.class_name, day: src.day, hour: src.hour,
+              status: 'invalid', violated_constraints: ['Could not verify this swap'],
+            }))
+        )
+      ).then(results => { if (!cancelled) setCandidates(results) })
+
+      return () => { cancelled = true }
     }
 
-    fetch('/api/swap/candidates', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sessionId, class_name: selected.className, day: selected.day, hour: selected.hour }),
-    })
-      .then(r => r.json())
-      .then(setCandidates)
-      .catch(() => setCandidates([]))
-  }, [selected, sessionId])
+    getSwapCandidates(sessionId, selected.className, selected.day, selected.hour)
+      .then(list => { if (!cancelled) setCandidates(list) })
+      .catch(() => { if (!cancelled) setCandidates([]) })
+
+    return () => { cancelled = true }
+  }, [selected, sessionId, grids])
 
   const handleSelect = useCallback((sel) => {
     setSelected(sel)
@@ -1146,15 +1270,16 @@ export default function ScheduleViewPage({
   const handleSwap = useCallback(async (candidate) => {
     if (!selected || swapping) return
     setSwapping(true)
+    setSwapError(null)
     try {
       let slotA, slotB
       if (selected.isEmpty) {
         // Empty tile was selected first — candidate is the filled source, selected is the empty target
-        slotA = { className: candidate.class_name, day: candidate.day,  hour: candidate.hour }
-        slotB = { className: candidate.class_name, day: selected.day,   hour: selected.hour  }
+        slotA = { className: candidate.class_name, day: candidate.day, hour: candidate.hour }
+        slotB = { className: candidate.class_name, day: selected.day, hour: selected.hour }
       } else {
-        slotA = { className: selected.className,   day: selected.day,   hour: selected.hour  }
-        slotB = { className: candidate.class_name, day: candidate.day,  hour: candidate.hour }
+        slotA = { className: selected.className, day: selected.day, hour: selected.hour }
+        slotB = { className: candidate.class_name, day: candidate.day, hour: candidate.hour }
       }
       const updated = await performSwap(sessionId, slotA, slotB)
       setGrids(updated)
@@ -1162,6 +1287,7 @@ export default function ScheduleViewPage({
       setCandidates(null)
     } catch (e) {
       console.error('Swap failed', e)
+      setSwapError(e.message || 'Swap failed — the schedule was not changed.')
     }
     setSwapping(false)
   }, [selected, sessionId, swapping])
@@ -1174,10 +1300,10 @@ export default function ScheduleViewPage({
 
   const handleSaveProject = () => {
     if (!grids) return
-    const baseClasses  = customizePayload?.classes  ?? parsedData?.classes  ?? []
+    const baseClasses = customizePayload?.classes ?? parsedData?.classes ?? []
     const baseTeachers = customizePayload?.teachers ?? parsedData?.teachers ?? []
     const { classes, teachers } = mergeConstraintsIntoPayload({
-      classes:  baseClasses,
+      classes: baseClasses,
       teachers: baseTeachers,
       classConstraintsPayload,
       teacherConstraintsPayload,
@@ -1195,12 +1321,12 @@ export default function ScheduleViewPage({
     setTimeout(() => setSaveState('idle'), 1800)
   }
 
-  const classList   = grids ? sortClasses(Object.keys(grids.class_schedules)) : []
+  const classList = grids ? sortClasses(Object.keys(grids.class_schedules)) : []
   const teacherList = grids ? Object.keys(grids.teacher_schedules).sort() : []
 
   if (loading) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1, minHeight: '60vh', flexDirection: 'column', gap: 12 }}>
-      <Spinner size={28}/>
+      <Spinner size={28} />
       <div style={{ fontSize: 13, color: 'var(--c-ink-3)' }}>Loading schedule…</div>
     </div>
   )
@@ -1208,7 +1334,9 @@ export default function ScheduleViewPage({
   if (error) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1, minHeight: '60vh', flexDirection: 'column', gap: 12 }}>
       <div style={{ fontSize: 14, color: 'var(--c-danger)' }}>Failed to load schedule: {error}</div>
-      <button onClick={onBack} style={btnStyle('outline')}>← Back</button>
+      <button onClick={() => setShowBackConfirm(true)} style={{ ...btnStyle('outline'), padding: '7px 14px', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <IconBack/> Back
+      </button>
     </div>
   )
 
@@ -1233,8 +1361,8 @@ export default function ScheduleViewPage({
         padding: '16px 24px', borderBottom: '1px solid var(--c-border)',
         background: 'var(--c-surface)', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
       }}>
-        <button onClick={onBack} style={{ ...btnStyle('outline'), padding: '7px 14px', display: 'flex', alignItems: 'center', gap: 6 }}>
-          <IconBack/> Back
+        <button onClick={() => setShowBackConfirm(true)} style={{ ...btnStyle('outline'), padding: '7px 14px', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <IconBack /> Back
         </button>
 
         <h1 style={{ fontFamily: 'var(--f-display)', fontSize: 22, letterSpacing: '-0.4px', margin: 0, flex: 1 }}>
@@ -1242,7 +1370,7 @@ export default function ScheduleViewPage({
         </h1>
 
         <div style={{ display: 'flex', gap: 0, border: '1px solid var(--c-border)', borderRadius: 8, overflow: 'hidden' }}>
-          {[['classes','Classes'],['teachers','Teachers']].map(([k,l]) => (
+          {[['classes', 'Classes'], ['teachers', 'Teachers']].map(([k, l]) => (
             <button key={k} onClick={() => { setViewMode(k); setSelected(null); setCandidates(null) }} style={{
               padding: '7px 16px', border: 'none', fontSize: 13, fontWeight: 500,
               fontFamily: 'var(--f-body)', cursor: 'pointer',
@@ -1257,32 +1385,32 @@ export default function ScheduleViewPage({
           onClick={() => setShowStats(s => !s)}
           style={{ ...btnStyle(showStats ? 'accent' : 'outline'), display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px' }}
         >
-          <IconStats/> Stats
+          <IconStats /> Stats
         </button>
 
         <button
           onClick={toggleEdit}
           style={{ ...btnStyle(editMode ? 'accent' : 'outline'), display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px' }}
         >
-          <IconEdit/> {editMode ? 'Editing' : 'Edit'}
+          <IconEdit /> {editMode ? 'Editing' : 'Edit'}
         </button>
 
         <button
           onClick={handleSaveProject}
           style={{ ...btnStyle(saveState === 'saved' ? 'accent' : 'outline'), display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px' }}
         >
-          <IconSave/> {saveState === 'saved' ? 'Saved!' : 'Save project'}
+          <IconSave /> {saveState === 'saved' ? 'Saved!' : 'Save project'}
         </button>
 
         <div style={{ display: 'flex', gap: 6 }}>
           <button onClick={() => exportCSV(grids)} style={{ ...btnStyle('outline'), display: 'flex', alignItems: 'center', gap: 5, padding: '7px 12px', fontSize: 12 }}>
-            <IconExport/> CSV
+            <IconExport /> CSV
           </button>
           <button onClick={() => exportTeacherSchedule(sessionId)} style={{ ...btnStyle('outline'), display: 'flex', alignItems: 'center', gap: 5, padding: '7px 12px', fontSize: 12 }}>
-            <IconExport/> Teachers XLSX
+            <IconExport /> Teachers XLSX
           </button>
           <button onClick={() => exportClassSchedules(sessionId)} style={{ ...btnStyle('outline'), display: 'flex', alignItems: 'center', gap: 5, padding: '7px 12px', fontSize: 12 }}>
-            <IconExport/> Classes XLSX
+            <IconExport /> Classes XLSX
           </button>
         </div>
       </div>
@@ -1343,14 +1471,16 @@ export default function ScheduleViewPage({
             )
           })}
         </div>
-
+        
+        
         {/* main content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '20px 24px' }}>
 
           {editMode && (
             <div style={{
               display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16,
+              padding: '10px 14px', borderRadius: 8, marginBottom: 16, minHeight: 74,
+              boxSizing: 'border-box',
               background: selected ? 'rgba(43,92,230,0.06)' : 'rgba(180,130,0,0.06)',
               border: `1px solid ${selected ? 'rgba(43,92,230,0.2)' : 'rgba(180,130,0,0.25)'}`,
             }}>
@@ -1359,15 +1489,30 @@ export default function ScheduleViewPage({
               </div>
               {selected && (
                 <button onClick={() => { setSelected(null); setCandidates(null) }} style={{ ...btnStyle('outline'), padding: '4px 10px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <IconClose/> Deselect
+                  <IconClose /> Deselect
                 </button>
               )}
-              {selected && candidates && <SwapLegend/>}
+              {selected && candidates && <SwapLegend />}
+            </div>
+          )}
+
+          {swapError && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '10px 14px', borderRadius: 8, marginBottom: 16,
+              background: 'rgba(192,57,43,0.08)', border: '1px solid rgba(192,57,43,0.25)',
+            }}>
+              <div style={{ flex: 1, fontSize: 13, color: 'var(--c-danger)', fontWeight: 500 }}>
+                ⚠ {swapError}
+              </div>
+              <button onClick={() => setSwapError(null)} style={{ ...btnStyle('outline'), padding: '4px 10px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <IconClose /> Dismiss
+              </button>
             </div>
           )}
 
           {showStats ? (
-            <StatsPanel grids={grids}/>
+            <StatsPanel grids={grids} />
 
           ) : viewMode === 'classes' && activeClass ? (
             <>
@@ -1430,10 +1575,51 @@ export default function ScheduleViewPage({
               />
             </>
 
-          ) : null}
+                    ) : null}
 
         </div>
       </div>
+
+      {showBackConfirm && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 1000,
+            background: 'rgba(0,0,0,0.35)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          onClick={() => setShowBackConfirm(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: 'var(--c-surface)', borderRadius: 12,
+              padding: 24, width: 360, maxWidth: '90vw',
+              boxShadow: '0 12px 32px rgba(0,0,0,0.25)',
+            }}
+          >
+            <h3 style={{ margin: '0 0 8px', fontSize: 16, fontWeight: 700 }}>
+              Go back to the previous step?
+            </h3>
+            <p style={{ margin: '0 0 20px', fontSize: 13, color: 'var(--c-ink-2)', lineHeight: 1.5 }}>
+              Any changes you haven't saved as a project file will be lost.
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                onClick={() => setShowBackConfirm(false)}
+                style={btnStyle('outline')}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setShowBackConfirm(false); onBack() }}
+                style={{ ...btnStyle('accent'), background: 'var(--c-danger)' }}
+              >
+                Leave without saving
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1445,6 +1631,6 @@ function btnStyle(variant) {
     padding: '8px 16px', transition: 'all 0.15s',
   }
   if (variant === 'outline') return { ...base, border: '1px solid var(--c-border-h)', background: 'var(--c-surface)', color: 'var(--c-ink-2)' }
-  if (variant === 'accent')  return { ...base, border: 'none', background: 'var(--c-accent)', color: '#fff' }
+  if (variant === 'accent') return { ...base, border: 'none', background: 'var(--c-accent)', color: '#fff' }
   return base
 }

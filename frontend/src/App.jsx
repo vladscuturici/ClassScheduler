@@ -9,6 +9,7 @@ import FinalCheckPage from './pages/FinalCheckPage'
 import SearchingPage from './pages/SearchingPage'
 import StepBar from './components/StepBar'
 import ScheduleViewPage from './pages/ScheduleViewPage'
+import ManualPlacementPage from './pages/ManualPlacementPage'
 
 const PlaceholderPage = ({ name, onBack }) => (
   <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
@@ -47,11 +48,29 @@ export default function App() {
   const [classConstraintsPayload,   setClassConstraintsPayload]   = useState(null)
   const [teacherConstraintsPayload, setTeacherConstraintsPayload] = useState(null)
   const [searchParams,              setSearchParams]              = useState(null)
+  const [manualMode,                setManualMode]                = useState(false)
 
   const goNext = () => setStep(Math.min(step + 1, TOTAL_STEPS - 1))
   const goBack = () => setStep(Math.max(step - 1, 0))
 
   const renderPage = () => {
+    if (manualMode) {
+      return (
+        <ManualPlacementPage
+          sessionId={parsedData?.session_id}
+          customizePayload={customizePayload}
+          classConstraintsPayload={classConstraintsPayload}
+          teacherConstraintsPayload={teacherConstraintsPayload}
+          onBack={() => setManualMode(false)}
+          onGenerateFromPartial={(params) => {
+            setSearchParams(params)
+            setManualMode(false)
+            setStep(5)
+          }}
+        />
+      )
+    }
+
     switch (step) {
       case 0:
         return (
@@ -114,6 +133,7 @@ export default function App() {
               setSearchParams(params)
               goNext()
             }}
+            onManualPlacement={() => setManualMode(true)}
             onBack={goBack}
           />
         )

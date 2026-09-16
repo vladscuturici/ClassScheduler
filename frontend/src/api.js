@@ -81,7 +81,20 @@ export async function performSwap(sessionId, a, b) {
       class_name_b: b.className, day_b: b.day, hour_b: b.hour,
     }),
   })
-  if (!res.ok) throw new Error('Swap failed')
+  if (!res.ok) {
+    // The backend returns a JSON body like { detail: "..." } explaining
+    // exactly why the swap was rejected (busy teacher, would overwrite an
+    // existing lesson, late-start violation, etc). Surface that instead of
+    // a generic "Swap failed" so the user knows what actually went wrong.
+    let detail = null
+    try {
+      const body = await res.json()
+      detail = body?.detail ?? null
+    } catch {
+      // response wasn't JSON (e.g. a network-level error page) — fall through
+    }
+    throw new Error(detail || `Swap failed (${res.status})`)
+  }
   return res.json()
 }
 
@@ -212,4 +225,50 @@ export function loadProjectFile(file) {
     reader.onerror = () => reject(new Error('Could not read project file.'))
     reader.readAsText(file)
   })
+}
+
+export async function initManual(sessionId, classes, teachers) {
+  const res = await fetch(`${BASE}/manual/init`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ session_id: sessionId, classes, teachers }),
+  })
+  if (!res.ok) throw new Error('Could not initialize manual placement')
+  return res.json()   // ScheduleGrid (all empty)
+}
+
+export async function getManualCandidates(sessionId, teacher, day, hour) {
+  const params = new URLSearchParams({ session_id: sessionId, teacher, day, hour })
+  const res = await fetch(`${BASE}/manual/candidates?${params}`)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Could not fetch candidates')
+  }
+  return res.json()   // ManualCandidate[]
+}
+
+export async function placeManual(sessionId, className, subject, teacher, day, hour) {
+  const res = await fetch(`${BASE}/manual/place`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ session_id: sessionId, class_name: className, subject, teacher, day, hour }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Could not place slot')
+  }
+  return res.json()   // ScheduleGrid
+}
+
+export async function clearManual(sessionId, teacher, day, hour) {
+  const res = await fetch(`${BASE}/manual/clear`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ session_id: sessionId, teacher, day, hour }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Could not clear slot')
+  }
+  return res.json()   // ScheduleGrid
 }

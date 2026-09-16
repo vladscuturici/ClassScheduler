@@ -337,7 +337,7 @@ export default function TeacherConstraintsPage({ teachers = [], onContinue, onBa
     const payload = teachers.map((t) => ({
       name: t.name,
       unavailable_slots: blockedToPayload(activeState[t.name] ?? new Set()),
-      max_gap: maxGaps[t.name] ?? 2,
+      max_gap: maxGaps[t.name] ?? 6,
     }))
     onContinue?.(payload)
   }

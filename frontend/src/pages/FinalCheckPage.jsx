@@ -369,6 +369,7 @@ export default function FinalCheckPage({
   classConstraintsPayload,
   teacherConstraintsPayload,
   onGenerate,
+  onManualPlacement, 
   onBack,
 }) {
   const [searchParams, setSearchParams] = useState({
@@ -446,7 +447,18 @@ export default function FinalCheckPage({
           >
             <IconArrowLeft /> Back
           </button>
-
+          {/* <button
+            onClick={() => onManualPlacement?.()}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '11px 22px', borderRadius: 100,
+              border: '1px solid var(--c-border-h)',
+              background: 'var(--c-surface)', color: 'var(--c-ink-2)',
+              fontFamily: 'var(--f-body)', fontSize: 14, fontWeight: 500, cursor: 'pointer',
+            }}
+          >
+            ✎ Place slots myself
+          </button> */}
           <button
             onClick={handleGenerate}
             style={{
