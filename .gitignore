@@ -16,7 +16,6 @@ scheduler/scheduler3.py
 scheduler/scheduler4.py
 scheduler/scheduler5.py
 scheduler/scheduler_optimizer.py
-frontend/src/pages/ManualPlacementPage.jsx
 v2.0.json
 v4.1.json
 v4.2.json
